@@ -1,0 +1,283 @@
+- name: Configure Express.js Boilerplate
+  hosts: hng
+  become: yes
+  vars:
+    app_user: fortisowo
+    app_dir: /opt/stage5_b
+    app_port: 3000
+    ansible_become_method: sudo
+    ansible_become_flags: '-H -S'
+    repo_url: "https://github.com/hngprojects/hng_boilerplate_expressjs"
+    repo_branch: "devops"
+    pg_user: hng_admin
+    pg_db: hng_db
+    rabbitmq_user: hng_rabbitmq_user
+    rabbitmq_password: "{{ lookup('password', '/dev/null chars=ascii_letters,digits length=16') }}"
+
+  tasks:
+    - name: Create hng user with sudo privileges
+      user:
+        name: hng
+        groups: sudo
+        shell: /bin/bash
+
+    - name: Ensure /opt/stage_5b directory exists
+      file:
+        path: /opt/stage_5b
+        state: directory
+        owner: hng
+        group: hng
+        mode: '0755'
+
+    - name: Remove existing content in /opt/stage_5b if necessary
+      file:
+        path: /opt/stage_5b
+        state: absent
+      become: yes
+      ignore_errors: yes
+      
+    - name: Recreate /opt/stage_5b directory
+      file:
+        path: /opt/stage_5b
+        state: directory
+        owner: hng
+        group: hng
+        mode: '0755'
+
+    - name: Clone repository
+      git:
+        repo: "{{ repo_url }}"
+        version: "{{ repo_branch }}"
+        dest: /opt/stage_5b
+      become_user: hng
+
+    - name: Set ownership of /opt/stage_5b
+      file:
+        path: /opt/stage_5b
+        owner: hng
+        group: hng
+        recurse: yes
+
+    - name: Install PostgreSQL
+      apt:
+        name:
+          - postgresql
+          - postgresql-contrib
+        state: present
+
+    - name: Start and enable PostgreSQL service
+      systemd:
+        name: postgresql
+        state: started
+        enabled: yes
+
+    - name: Generate PostgreSQL password
+      command: openssl rand -base64 12
+      register: pg_password
+
+    - name: Create PostgreSQL setup script
+      copy:
+        dest: /tmp/setup_postgres.sh
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          # Create PostgreSQL user if it does not exist
+          psql -c "DO \$\$ BEGIN
+                      IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '{{ pg_user }}') THEN
+                          CREATE ROLE {{ pg_user }} WITH LOGIN PASSWORD '{{ pg_password.stdout }}';
+                          ALTER ROLE {{ pg_user }} CREATEDB;
+                      END IF;
+                   END \$\$;"
+          # Create PostgreSQL database if it does not exist
+          psql -c "DO \$\$ BEGIN
+                      IF NOT EXISTS (SELECT FROM pg_database WHERE datname = '{{ pg_db }}') THEN
+                          CREATE DATABASE {{ pg_db }} OWNER {{ pg_user }};
+                      END IF;
+                   END \$\$;"
+
+    - name: Run PostgreSQL setup script
+      become: yes
+      become_user: postgres
+      command: /tmp/setup_postgres.sh
+      ignore_errors: yes
+
+    - name: Remove PostgreSQL setup script
+      file:
+        path: /tmp/setup_postgres.sh
+        state: absent
+
+    - name: Install RabbitMQ
+      apt:
+        name:
+          - rabbitmq-server
+        state: present
+
+    - name: Enable RabbitMQ management plugin
+      command: rabbitmq-plugins enable rabbitmq_management
+
+    - name: Start and enable RabbitMQ service
+      systemd:
+        name: rabbitmq-server
+        state: started
+        enabled: yes
+
+    - name: Check if RabbitMQ user exists
+      command: rabbitmqctl list_users --no-table-headers
+      register: rabbitmq_users_output
+
+    - name: Set RabbitMQ user existence fact
+      set_fact:
+        rabbitmq_user_exists: "{{ rabbitmq_user in rabbitmq_users_output.stdout_lines }}"
+
+    - name: Create RabbitMQ user if it does not exist
+      command: rabbitmqctl add_user {{ rabbitmq_user }} {{ rabbitmq_password }}
+      when: not rabbitmq_user_exists
+      ignore_errors: yes
+
+    - name: Set RabbitMQ user permissions
+      command: rabbitmqctl set_user_tags {{ rabbitmq_user }} administrator
+      when: rabbitmq_user_exists
+
+    - name: Set RabbitMQ user permissions on /
+      command: rabbitmqctl set_permissions -p / {{ rabbitmq_user }} ".*" ".*" ".*"
+      when: rabbitmq_user_exists
+
+    - name: Ensure /var/secrets directory exists
+      file:
+       path: /var/secrets
+       state: directory
+       mode: '0755'
+
+    - name: Save PostgreSQL credentials
+      copy:
+        content: "Username: {{ pg_user }}\nPassword: {{ pg_password.stdout }}\nDatabase: {{ pg_db }}"
+        dest: /var/secrets/pg_pw.txt
+        mode: '0600'
+
+    - name: Save RabbitMQ credentials
+      copy:
+        content: "Username: {{ rabbitmq_user }}\nPassword: {{ rabbitmq_password }}"
+        dest: /var/secrets/rabbitmq_creds.txt
+        mode: '0600'
+
+    - name: Install nvm
+      become: yes
+      become_user: hng
+      shell: |
+        if [ ! -d "$HOME/.nvm" ]; then
+          curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.5/install.sh | bash
+        fi
+        echo 'export NVM_DIR="$HOME/.nvm"' >> ~/.bashrc
+        echo '[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"' >> ~/.bashrc
+        source ~/.bashrc
+      args:
+        executable: /bin/bash
+
+    - name: Install Node.js using nvm
+      become: yes
+      become_user: hng
+      shell: |
+        source "$HOME/.nvm/nvm.sh"
+        nvm install node
+        nvm alias default node
+      args:
+        executable: /bin/bash
+
+    - name: Verify Node.js installation
+      become: yes
+      become_user: hng
+      shell: |
+        source "$HOME/.nvm/nvm.sh"
+        node -v
+      register: node_version
+      args:
+        executable: /bin/bash
+
+    - name: Display Node.js version
+      debug:
+        msg: "Node.js version: {{ node_version.stdout }}"
+
+    - name: Set up environment variables
+      copy:
+        dest: /opt/stage_5b/.env
+        content: |
+          PORT=3000
+          DB_HOST=localhost
+          DB_USER={{ pg_user }}
+          DB_PASSWORD={{ pg_password.stdout }}
+          DB_NAME={{ pg_db }}
+          RABBITMQ_HOST=localhost
+          RABBITMQ_PORT=5672
+          RABBITMQ_USER={{ rabbitmq_user }}
+          RABBITMQ_PASSWORD={{ rabbitmq_password }}
+        owner: hng
+        group: hng
+        mode: '0600'
+
+    - name: Install Nginx
+      apt:
+        name: nginx
+        state: present
+
+    - name: Configure Nginx reverse proxy
+      copy:
+        dest: /etc/nginx/sites-available/express_app
+        content: |
+          server {
+            listen 80;
+            server_name _;
+
+            location / {
+              proxy_pass http://127.0.0.1:3000;
+              proxy_http_version 1.1;
+              proxy_set_header Upgrade $http_upgrade;
+              proxy_set_header Connection 'upgrade';
+              proxy_set_header Host $host;
+              proxy_cache_bypass $http_upgrade;
+            }
+          }
+
+    - name: Enable Nginx site
+      file:
+        src: /etc/nginx/sites-available/express_app
+        dest: /etc/nginx/sites-enabled/express_app
+        state: link
+
+    - name: Restart Nginx
+      systemd:
+        name: nginx
+        state: restarted
+
+    - name: Create log directory
+      file:
+        path: /var/log/stage_5b
+        state: directory
+        owner: hng
+        group: hng
+        mode: '0755'
+
+    - name: Install PM2 globally using yarn
+      become: yes
+      become_user: hng
+      shell: |
+        source "$HOME/.nvm/nvm.sh"
+        yarn global add pm2
+        echo 'export PATH="$HOME/.yarn/bin:$HOME/.config/yarn/global/node_modules/.bin:$PATH"' >> ~/.bashrc
+        source ~/.bashrc
+      args:
+        executable: /bin/bash
+
+    - name: Debug PATH
+      become: yes
+      become_user: hng
+      shell: |
+        source "$HOME/.nvm/nvm.sh"
+        source ~/.bashrc
+        echo $PATH
+      args:
+        executable: /bin/bash
+      register: debug_path
+
+    - name: Display PATH
+      debug:
+        msg: "PATH: {{ debug_path.stdout }}"
