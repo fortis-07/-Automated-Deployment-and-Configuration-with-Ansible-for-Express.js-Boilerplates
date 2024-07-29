@@ -2,11 +2,9 @@
   hosts: hng
   become: yes
   vars:
-    app_user: fortisowo
-    app_dir: /opt/stage5_b
+    app_user: hng
+    app_dir: /opt/stage_5b
     app_port: 3000
-    ansible_become_method: sudo
-    ansible_become_flags: '-H -S'
     repo_url: "https://github.com/hngprojects/hng_boilerplate_expressjs"
     repo_branch: "devops"
     pg_user: hng_admin
@@ -17,46 +15,39 @@
   tasks:
     - name: Create hng user with sudo privileges
       user:
-        name: hng
+        name: "{{ app_user }}"
         groups: sudo
         shell: /bin/bash
 
     - name: Ensure /opt/stage_5b directory exists
       file:
-        path: /opt/stage_5b
+        path: "{{ app_dir }}"
         state: directory
-        owner: hng
-        group: hng
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
         mode: '0755'
 
     - name: Remove existing content in /opt/stage_5b if necessary
       file:
-        path: /opt/stage_5b
+        path: "{{ app_dir }}"
         state: absent
       become: yes
       ignore_errors: yes
-      
+
     - name: Recreate /opt/stage_5b directory
       file:
-        path: /opt/stage_5b
+        path: "{{ app_dir }}"
         state: directory
-        owner: hng
-        group: hng
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
         mode: '0755'
 
     - name: Clone repository
       git:
         repo: "{{ repo_url }}"
         version: "{{ repo_branch }}"
-        dest: /opt/stage_5b
-      become_user: hng
-
-    - name: Set ownership of /opt/stage_5b
-      file:
-        path: /opt/stage_5b
-        owner: hng
-        group: hng
-        recurse: yes
+        dest: "{{ app_dir }}"
+      become_user: "{{ app_user }}"
 
     - name: Install PostgreSQL
       apt:
@@ -81,14 +72,12 @@
         mode: '0755'
         content: |
           #!/bin/bash
-          # Create PostgreSQL user if it does not exist
           psql -c "DO \$\$ BEGIN
                       IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '{{ pg_user }}') THEN
                           CREATE ROLE {{ pg_user }} WITH LOGIN PASSWORD '{{ pg_password.stdout }}';
                           ALTER ROLE {{ pg_user }} CREATEDB;
                       END IF;
                    END \$\$;"
-          # Create PostgreSQL database if it does not exist
           psql -c "DO \$\$ BEGIN
                       IF NOT EXISTS (SELECT FROM pg_database WHERE datname = '{{ pg_db }}') THEN
                           CREATE DATABASE {{ pg_db }} OWNER {{ pg_user }};
@@ -114,6 +103,7 @@
 
     - name: Enable RabbitMQ management plugin
       command: rabbitmq-plugins enable rabbitmq_management
+      become: yes
 
     - name: Start and enable RabbitMQ service
       systemd:
@@ -144,9 +134,9 @@
 
     - name: Ensure /var/secrets directory exists
       file:
-       path: /var/secrets
-       state: directory
-       mode: '0755'
+        path: /var/secrets
+        state: directory
+        mode: '0755'
 
     - name: Save PostgreSQL credentials
       copy:
@@ -162,20 +152,20 @@
 
     - name: Install nvm
       become: yes
-      become_user: hng
+      become_user: "{{ app_user }}"
       shell: |
         if [ ! -d "$HOME/.nvm" ]; then
           curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.5/install.sh | bash
         fi
+        source "$HOME/.nvm/nvm.sh"
         echo 'export NVM_DIR="$HOME/.nvm"' >> ~/.bashrc
         echo '[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"' >> ~/.bashrc
-        source ~/.bashrc
       args:
         executable: /bin/bash
 
     - name: Install Node.js using nvm
       become: yes
-      become_user: hng
+      become_user: "{{ app_user }}"
       shell: |
         source "$HOME/.nvm/nvm.sh"
         nvm install node
@@ -185,7 +175,7 @@
 
     - name: Verify Node.js installation
       become: yes
-      become_user: hng
+      become_user: "{{ app_user }}"
       shell: |
         source "$HOME/.nvm/nvm.sh"
         node -v
@@ -199,9 +189,9 @@
 
     - name: Set up environment variables
       copy:
-        dest: /opt/stage_5b/.env
+        dest: "{{ app_dir }}/.env"
         content: |
-          PORT=3000
+          PORT={{ app_port }}
           DB_HOST=localhost
           DB_USER={{ pg_user }}
           DB_PASSWORD={{ pg_password.stdout }}
@@ -210,8 +200,8 @@
           RABBITMQ_PORT=5672
           RABBITMQ_USER={{ rabbitmq_user }}
           RABBITMQ_PASSWORD={{ rabbitmq_password }}
-        owner: hng
-        group: hng
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
         mode: '0600'
 
     - name: Install Nginx
@@ -228,7 +218,7 @@
             server_name _;
 
             location / {
-              proxy_pass http://127.0.0.1:3000;
+              proxy_pass http://127.0.0.1:{{ app_port }};
               proxy_http_version 1.1;
               proxy_set_header Upgrade $http_upgrade;
               proxy_set_header Connection 'upgrade';
@@ -252,32 +242,26 @@
       file:
         path: /var/log/stage_5b
         state: directory
-        owner: hng
-        group: hng
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
         mode: '0755'
 
-    - name: Install PM2 globally using yarn
+    - name: Install PM2 globally using nvm
       become: yes
-      become_user: hng
+      become_user: "{{ app_user }}"
       shell: |
         source "$HOME/.nvm/nvm.sh"
-        yarn global add pm2
-        echo 'export PATH="$HOME/.yarn/bin:$HOME/.config/yarn/global/node_modules/.bin:$PATH"' >> ~/.bashrc
-        source ~/.bashrc
+        npm install -g pm2
       args:
         executable: /bin/bash
 
-    - name: Debug PATH
-      become: yes
-      become_user: hng
+    - name: Configure logging for application
       shell: |
         source "$HOME/.nvm/nvm.sh"
-        source ~/.bashrc
-        echo $PATH
+        pm2 start {{ app_dir }}/app.js --name express_app --log /var/log/stage_5b/out.log --error /var/log/stage_5b/error.log
+        pm2 save
+      become: yes
+      become_user: "{{ app_user }}"
       args:
         executable: /bin/bash
-      register: debug_path
 
-    - name: Display PATH
-      debug:
-        msg: "PATH: {{ debug_path.stdout }}"
