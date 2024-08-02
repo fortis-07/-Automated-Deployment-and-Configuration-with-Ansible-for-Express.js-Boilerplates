@@ -1,267 +1,298 @@
-- name: Configure Express.js Boilerplate
+---
+# Playbook for deploying an ExpressJS app and configuring PostgreSQL
+- name: Deploy ExpressJS App and Configure PostgreSQL
   hosts: hng
   become: yes
   vars:
-    app_user: hng
-    app_dir: /opt/stage_5b
+    ansible_python_interpreter: /usr/bin/python3
+    pg_admin_user: admin
+    pg_admin_password: "{{ lookup('password', '/var/secrets/pg_pw.txt length=16 chars=ascii_letters') }}"
+    pg_database: hng_stage_5b_db
     app_port: 3000
-    repo_url: "https://github.com/hngprojects/hng_boilerplate_expressjs"
-    repo_branch: "devops"
-    pg_user: hng_admin
-    pg_db: hng_db
-    rabbitmq_user: hng_rabbitmq_user
-    rabbitmq_password: "{{ lookup('password', '/dev/null chars=ascii_letters,digits length=16') }}"
+    db_host: localhost
+    db_port: 5432
+    redis_host: localhost
+    redis_port: 6379
 
   tasks:
-    - name: Create hng user with sudo privileges
-      user:
-        name: "{{ app_user }}"
-        groups: sudo
-        shell: /bin/bash
-
-    - name: Ensure /opt/stage_5b directory exists
-      file:
-        path: "{{ app_dir }}"
-        state: directory
-        owner: "{{ app_user }}"
-        group: "{{ app_user }}"
-        mode: '0755'
-
-    - name: Remove existing content in /opt/stage_5b if necessary
-      file:
-        path: "{{ app_dir }}"
-        state: absent
-      become: yes
-      ignore_errors: yes
-
-    - name: Recreate /opt/stage_5b directory
-      file:
-        path: "{{ app_dir }}"
-        state: directory
-        owner: "{{ app_user }}"
-        group: "{{ app_user }}"
-        mode: '0755'
-
-    - name: Clone repository
-      git:
-        repo: "{{ repo_url }}"
-        version: "{{ repo_branch }}"
-        dest: "{{ app_dir }}"
-      become_user: "{{ app_user }}"
-
-    - name: Install PostgreSQL
+    # Install necessary packages
+    - name: Ensuring necessary packages are installed
       apt:
         name:
+          - git
           - postgresql
-          - postgresql-contrib
+          - python3-pip
+          - curl
+          - gnupg
+          - nginx
+          - python3-psycopg2
+          - redis-server
+        state: present
+        update_cache: yes
+
+    # Install psycopg2 using pip (for some Python versions)
+    - name: Installing psycopg2 using pip (if needed, for some Python versions)
+      pip:
+        name: psycopg2-binary
         state: present
 
-    - name: Start and enable PostgreSQL service
-      systemd:
+    # Ensure PostgreSQL is running
+    - name: Ensuring PostgreSQL is running
+      service:
         name: postgresql
         state: started
         enabled: yes
 
-    - name: Generate PostgreSQL password
-      command: openssl rand -base64 12
-      register: pg_password
-
-    - name: Create PostgreSQL setup script
-      copy:
-        dest: /tmp/setup_postgres.sh
-        mode: '0755'
-        content: |
-          #!/bin/bash
-          psql -c "DO \$\$ BEGIN
-                      IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '{{ pg_user }}') THEN
-                          CREATE ROLE {{ pg_user }} WITH LOGIN PASSWORD '{{ pg_password.stdout }}';
-                          ALTER ROLE {{ pg_user }} CREATEDB;
-                      END IF;
-                   END \$\$;"
-          psql -c "DO \$\$ BEGIN
-                      IF NOT EXISTS (SELECT FROM pg_database WHERE datname = '{{ pg_db }}') THEN
-                          CREATE DATABASE {{ pg_db }} OWNER {{ pg_user }};
-                      END IF;
-                   END \$\$;"
-
-    - name: Run PostgreSQL setup script
-      become: yes
-      become_user: postgres
-      command: /tmp/setup_postgres.sh
-      ignore_errors: yes
-
-    - name: Remove PostgreSQL setup script
-      file:
-        path: /tmp/setup_postgres.sh
-        state: absent
-
-    - name: Install RabbitMQ
-      apt:
-        name:
-          - rabbitmq-server
-        state: present
-
-    - name: Enable RabbitMQ management plugin
-      command: rabbitmq-plugins enable rabbitmq_management
-      become: yes
-
-    - name: Start and enable RabbitMQ service
-      systemd:
-        name: rabbitmq-server
+    # Ensure Redis is running
+    - name: Ensuring Redis is running
+      service:
+        name: redis-server
         state: started
         enabled: yes
 
-    - name: Check if RabbitMQ user exists
-      command: rabbitmqctl list_users --no-table-headers
-      register: rabbitmq_users_output
-
-    - name: Set RabbitMQ user existence fact
-      set_fact:
-        rabbitmq_user_exists: "{{ rabbitmq_user in rabbitmq_users_output.stdout_lines }}"
-
-    - name: Create RabbitMQ user if it does not exist
-      command: rabbitmqctl add_user {{ rabbitmq_user }} {{ rabbitmq_password }}
-      when: not rabbitmq_user_exists
-      ignore_errors: yes
-
-    - name: Set RabbitMQ user permissions
-      command: rabbitmqctl set_user_tags {{ rabbitmq_user }} administrator
-      when: rabbitmq_user_exists
-
-    - name: Set RabbitMQ user permissions on /
-      command: rabbitmqctl set_permissions -p / {{ rabbitmq_user }} ".*" ".*" ".*"
-      when: rabbitmq_user_exists
-
-    - name: Ensure /var/secrets directory exists
+    # Create directory for storing secrets
+    - name: Ensuring /var/secrets directory exists
       file:
         path: /var/secrets
         state: directory
-        mode: '0755'
+        mode: '0700'
 
-    - name: Save PostgreSQL credentials
-      copy:
-        content: "Username: {{ pg_user }}\nPassword: {{ pg_password.stdout }}\nDatabase: {{ pg_db }}"
-        dest: /var/secrets/pg_pw.txt
-        mode: '0600'
-
-    - name: Save RabbitMQ credentials
-      copy:
-        content: "Username: {{ rabbitmq_user }}\nPassword: {{ rabbitmq_password }}"
-        dest: /var/secrets/rabbitmq_creds.txt
-        mode: '0600'
-
-    - name: Install nvm
-      become: yes
-      become_user: "{{ app_user }}"
-      shell: |
-        if [ ! -d "$HOME/.nvm" ]; then
-          curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.5/install.sh | bash
-        fi
-        source "$HOME/.nvm/nvm.sh"
-        echo 'export NVM_DIR="$HOME/.nvm"' >> ~/.bashrc
-        echo '[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"' >> ~/.bashrc
-      args:
-        executable: /bin/bash
-
-    - name: Install Node.js using nvm
-      become: yes
-      become_user: "{{ app_user }}"
-      shell: |
-        source "$HOME/.nvm/nvm.sh"
-        nvm install node
-        nvm alias default node
-      args:
-        executable: /bin/bash
-
-    - name: Verify Node.js installation
-      become: yes
-      become_user: "{{ app_user }}"
-      shell: |
-        source "$HOME/.nvm/nvm.sh"
-        node -v
-      register: node_version
-      args:
-        executable: /bin/bash
-
-    - name: Display Node.js version
-      debug:
-        msg: "Node.js version: {{ node_version.stdout }}"
-
-    - name: Set up environment variables
-      copy:
-        dest: "{{ app_dir }}/.env"
-        content: |
-          PORT={{ app_port }}
-          DB_HOST=localhost
-          DB_USER={{ pg_user }}
-          DB_PASSWORD={{ pg_password.stdout }}
-          DB_NAME={{ pg_db }}
-          RABBITMQ_HOST=localhost
-          RABBITMQ_PORT=5672
-          RABBITMQ_USER={{ rabbitmq_user }}
-          RABBITMQ_PASSWORD={{ rabbitmq_password }}
-        owner: "{{ app_user }}"
-        group: "{{ app_user }}"
-        mode: '0600'
-
-    - name: Install Nginx
-      apt:
-        name: nginx
-        state: present
-
-    - name: Configure Nginx reverse proxy
-      copy:
-        dest: /etc/nginx/sites-available/express_app
-        content: |
-          server {
-            listen 80;
-            server_name _;
-
-            location / {
-              proxy_pass http://127.0.0.1:{{ app_port }};
-              proxy_http_version 1.1;
-              proxy_set_header Upgrade $http_upgrade;
-              proxy_set_header Connection 'upgrade';
-              proxy_set_header Host $host;
-              proxy_cache_bypass $http_upgrade;
-            }
-          }
-
-    - name: Enable Nginx site
-      file:
-        src: /etc/nginx/sites-available/express_app
-        dest: /etc/nginx/sites-enabled/express_app
-        state: link
-
-    - name: Restart Nginx
-      systemd:
-        name: nginx
+    # Configure PostgreSQL authentication
+    - name: Configure PostgreSQL to use password authentication
+      lineinfile:
+        path: /etc/postgresql/14/main/pg_hba.conf
+        regexp: '^local\s+all\s+postgres\s+md5'
+        line: 'local   all             postgres                                trust'
+    
+    # Restart PostgreSQL to apply configuration changes
+    - name: Restart PostgreSQL service to apply configuration changes
+      service:
+        name: postgresql
         state: restarted
 
-    - name: Create log directory
+    # Create PostgreSQL superuser
+    - name: Creating PostgreSQL superuser
+      postgresql_user:
+        name: "{{ pg_admin_user }}"
+        password: "{{ pg_admin_password }}"
+        role_attr_flags: SUPERUSER
+        state: present
+
+    # Save PostgreSQL admin credentials
+    - name: Save PostgreSQL admin credentials to /var/secrets/pg_pw.txt
+      copy:
+        dest: /var/secrets/pg_pw.txt
+        content: |
+          [PostgreSQL Admin Credentials]
+          User: {{ pg_admin_user }}
+          Password: {{ pg_admin_password }}
+        mode: '0600'
+
+    # Install NVM (Node Version Manager)
+    - name: Installing NVM (Node Version Manager)
+      shell: |
+        curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+        export NVM_DIR="$HOME/.nvm"
+        [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+        [ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"
+      environment:
+        SHELL: /bin/bash
+      register: nvm_install
+
+    # Install Node.js using NVM
+    - name: Installing Node.js version 18 using NVM
+      shell: |
+        export NVM_DIR="$HOME/.nvm"
+        [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+        nvm install 18
+        nvm alias default 18
+      environment:
+        SHELL: /bin/bash
+      when: nvm_install is succeeded
+
+    # Install Yarn globally
+    - name: Installing Yarn globally using npm
+      shell: |
+        export NVM_DIR="$HOME/.nvm"
+        [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+        npm install --global yarn
+      environment:
+        SHELL: /bin/bash
+
+    # Create 'hng' user
+    - name: Ensuring the hng user exists
+      user:
+        name: hng
+        state: present
+        shell: /bin/bash
+        create_home: no
+
+    # Add 'hng' user to sudo group
+    - name: Adding hng user to the sudo group
+      user:
+        name: hng
+        groups: sudo
+        append: yes
+
+    # Create application directory
+    - name: Creating destination directory if it does not exist
+      file:
+        path: /opt/stage_5b
+        state: directory
+        mode: '0755'
+
+    # Set ownership of application directory
+    - name: Changing ownership of the destination directory to hng user
+      file:
+        path: /opt/stage_5b
+        owner: hng
+        group: hng
+        recurse: yes
+
+    # Create log directory
+    - name: Creating log directory
       file:
         path: /var/log/stage_5b
         state: directory
-        owner: "{{ app_user }}"
-        group: "{{ app_user }}"
         mode: '0755'
 
-    - name: Install PM2 globally using nvm
-      become: yes
-      become_user: "{{ app_user }}"
-      shell: |
-        source "$HOME/.nvm/nvm.sh"
-        npm install -g pm2
-      args:
-        executable: /bin/bash
+    # Set ownership of log directory
+    - name: Ensuring correct ownership of log directory
+      file:
+        path: /var/log/stage_5b
+        owner: hng
+        group: hng
 
-    - name: Configure logging for application
-      shell: |
-        source "$HOME/.nvm/nvm.sh"
-        pm2 start {{ app_dir }}/app.js --name express_app --log /var/log/stage_5b/out.log --error /var/log/stage_5b/error.log
-        pm2 save
-      become: yes
-      become_user: "{{ app_user }}"
-      args:
-        executable: /bin/bash
+    # Add directory to Git safe list
+    - name: Add directory to Git safe list
+      command: git config --global --add safe.directory /opt/stage_5b
 
+    # Clone the application repository
+    - name: Cloning the repository
+      git:
+        repo: 'https://github.com/hngprojects/hng_boilerplate_expressjs.git'
+        dest: /opt/stage_5b
+        version: 'devops'
+        force: yes
+
+    # Copy environment file
+    - name: Copying .env.example to .env
+      command: cp /opt/stage_5b/.env.example /opt/stage_5b/.env
+
+    # Update environment file with credentials
+    - name: Updating .env file with database and Redis credentials
+      lineinfile:
+        path: /opt/stage_5b/.env
+        regexp: '^{{ item.key }}='
+        line: '{{ item.key }}={{ item.value }}'
+      loop:
+        - { key: 'PORT', value: '{{ app_port }}' }
+        - { key: 'DB_USER', value: '{{ pg_admin_user }}' }
+        - { key: 'DB_HOST', value: '{{ db_host }}' }
+        - { key: 'DB_PASSWORD', value: '{{ pg_admin_password }}' }
+        - { key: 'DB_PORT', value: '{{ db_port }}' }
+        - { key: 'DB_NAME', value: '{{ pg_database }}' }
+        - { key: 'REDIS_HOST', value: '{{ redis_host }}' }
+        - { key: 'REDIS_PORT', value: '{{ redis_port }}' }
+
+    # Set ownership of environment file
+    - name: Changing ownership of .env file to hng user
+      file:
+        path: /opt/stage_5b/.env
+        owner: hng
+        group: hng
+
+    # Install application dependencies
+    - name: Installing app dependencies using Yarn
+      shell: |
+        export NVM_DIR="$HOME/.nvm"
+        [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+        yarn
+      args:
+        chdir: /opt/stage_5b
+
+    # Start the application
+    - name: Starting the application
+      shell: |
+        export NVM_DIR="$HOME/.nvm"
+        [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+        yarn start
+      args:
+        chdir: /opt/stage_5b
+        creates: /opt/stage_5b/app.pid
+
+    # Configure Nginx as reverse proxy
+    - name: Configuring Nginx for reverse proxy
+      copy:
+        dest: /etc/nginx/conf.d/stage_5b.conf
+        content: |
+          server {
+              listen 80;
+
+              location / {
+                  proxy_pass http://127.0.0.1:{{ app_port }};
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+              }
+          }
+        mode: '0644'
+
+    # Test Nginx configuration
+    - name: Testing Nginx configuration
+      command: nginx -t
+      ignore_errors: yes
+
+    # Restart Nginx to apply new configuration
+    - name: Restart Nginx to apply new configuration
+      service:
+        name: nginx
+        state: restarted
+
+    # Create systemd service file for the application
+    - name: Creating systemd service file for the application
+      copy:
+        dest: /etc/systemd/system/stage_5b.service
+        content: |
+          [Unit]
+          Description=Stage 5B ExpressJS Application
+          After=network.target
+
+          [Service]
+          User=hng
+          WorkingDirectory=/opt/stage_5b
+          ExecStart=/usr/bin/node /opt/stage_5b/index.js
+          Restart=always
+          StandardOutput=file:/var/log/stage_5b/out.log
+          StandardError=file:/var/log/stage_5b/error.log
+          Environment=PORT={{ app_port }}
+          Environment=DB_USER={{ pg_admin_user }}
+          Environment=DB_HOST={{ db_host }}
+          Environment=DB_PASSWORD={{ pg_admin_password }}
+          Environment=DB_PORT={{ db_port }}
+          Environment=DB_NAME={{ pg_database }}
+          Environment=REDIS_HOST={{ redis_host }}
+          Environment=REDIS_PORT={{ redis_port }}
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+
+    # Reload systemd to recognize the new service
+    - name: Reloading systemd to recognize the new service
+      command: systemctl daemon-reload
+
+    # Start and enable the application service
+    - name: Starting and enabling the application service
+      service:
+        name: stage_5b
+        state: started
+        enabled: yes
+
+  handlers:
+    # Handler to restart PostgreSQL if needed
+    - name: Restart PostgreSQL
+      service:
+        name: postgresql
+        state: restarted
