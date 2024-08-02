@@ -1,94 +1,84 @@
-# Automated Deployment and Configuration with Ansible for Boilerplates
+# ExpressJS App Deployment with Ansible
+
+This repository contains an Ansible playbook for deploying an ExpressJS application with PostgreSQL and Redis on a target host.
+
+## Table of Contents
+
+- [Overview](#overview)
+- [Prerequisites](#prerequisites)
+- [Configuration](#configuration)
+- [Usage](#usage)
+- [Playbook Tasks](#playbook-tasks)
+- [Variables](#variables)
+- [Security Considerations](#security-considerations)
+- [Troubleshooting](#troubleshooting)
+- [Contributing](#contributing)
+- [License](#license)
 
 ## Overview
 
-This project focuses on automating the deployment and configuration of a boilerplate application using Ansible. The goal is to configure an instance of the chosen boilerplate by utilizing Infrastructure as Code (IaC) with Ansible to streamline setup and management tasks.
+This Ansible playbook automates the deployment of an ExpressJS application, including the setup of PostgreSQL, Redis, Nginx as a reverse proxy, and system services for automatic startup.
 
-## Project Goals
-
-The deployment process includes:
-
-1. **Cloning the Repository**:
-   - Cloning the `devops` branch of the specified boilerplate repository to a remote Ubuntu 22.04 server.
-
-2. **Installing Dependencies and Deploying**:
-   - Installing necessary dependencies such as PostgreSQL and RabbitMQ.
-   - Building and deploying the boilerplate application.
-
-3. **Setting Up PostgreSQL**:
-   - Configuring a PostgreSQL database and storing credentials securely.
-
-4. **Configuring Messaging Queue**:
-   - Setting up RabbitMQ and managing user permissions.
-
-5. **Application Configuration**:
-   - Ensuring the application runs on port 3000 and setting up Nginx to reverse proxy to port 80.
-
-6. **Configuring Logging**:
-   - Setting up logging to capture stderr and stdout logs.
-
-## Instructions
-
-### User and Directory Setup
-
-- **Create User**:
-  - Creates a user named `hng` with sudo privileges.
-
-- **Clone Repository**:
-  - Clones the devops branch of the repository into `/opt/stage_5b` and assigns ownership to the `hng` user.
-
-### Database and Dependencies
-
-- **Install PostgreSQL**:
-  - Installs PostgreSQL, creates a user and database, and stores credentials in `/var/secrets/pg_pw.txt`.
-
-- **Install RabbitMQ**:
-  - Installs RabbitMQ, enables the management plugin, and sets up users and permissions.
-
-- **Install Dependencies**:
-  - Installs Node.js using NVM and sets up other necessary dependencies.
-
-### Application and Proxy Setup
-
-- **Start Application**:
-  - Configures the application to run on `127.0.0.1:3000`.
-
-- **Install and Configure Nginx**:
-  - Installs Nginx and configures it to reverse proxy requests from port 80 to port 3000.
-
-### Logging Configuration
-
-- **Setup Logging**:
-  - Configures PM2 to handle logging, ensuring stderr and stdout logs are written to specified paths.
-
-## File Structure
-
-- `/var/secrets/pg_pw.txt`: Contains PostgreSQL credentials.
-- `/var/secrets/rabbitmq_creds.txt`: Contains RabbitMQ credentials.
-- `/var/log/stage_5b/`: Directory for application logs (`error.log` and `out.log`).
-- `/opt/stage_5b/`: Directory where the boilerplate repository is cloned.
-
-## Requirements
+## Prerequisites
 
 - Ansible 2.9 or higher
-- Ubuntu 22.04 server
-- Node.js (installed via NVM)
-- PostgreSQL
-- RabbitMQ
-- Nginx
-- PM2
+- Target host running a Debian-based Linux distribution (e.g., Ubuntu)
+- SSH access to the target host
+- Sudo privileges on the target host
+
+## Configuration
+
+1. Clone this repository:
+```bash
+git clone https://github.com/yourusername/expressjs-ansible-deploy.git
+```
+cd main.yaml
+
+2. Update the `hosts` file with your target host details:
+[hng]
+your_target_host ansible_user=your_ssh_user
+3. Modify the variables in the playbook (`main.yml`) if needed.
 
 ## Usage
+```bash
+ansible-playbook -i host main.yml
+```
 
-1. **Prepare the Server**:
-   - Ensure you have a remote Ubuntu 22.04 server with SSH access.
+Run the playbook using the following command:
 
-2. **Run the Ansible Playbook**:
-   - Clone this repository.
-   - Navigate to the repository directory.
-   - Run the playbook using the following command:
-     ```bash
-     sudo ansible-playbook -i <your_inventory_file> main.yml
-     ```
+## Playbook Tasks
 
-     
+The playbook performs the following main tasks:
+
+1. Installs necessary packages (Git, PostgreSQL, Python3-pip, etc.)
+2. Configures PostgreSQL and creates a database user
+3. Installs Node.js using NVM and Yarn package manager
+4. Clones the ExpressJS application repository
+5. Sets up environment variables
+6. Installs application dependencies
+7. Configures Nginx as a reverse proxy
+8. Creates and starts a systemd service for the application
+
+## Variables
+
+Key variables that you may want to modify:
+
+- `pg_admin_user`: PostgreSQL admin username
+- `pg_database`: Name of the database to be created
+- `app_port`: Port on which the ExpressJS app will run
+- `db_host`, `db_port`: Database connection details
+- `redis_host`, `redis_port`: Redis connection details
+
+## Security Considerations
+
+- The playbook generates a random password for the PostgreSQL admin user and stores it in `/var/secrets/pg_pw.txt` on the target host.
+- Ensure to secure your target host and restrict access to sensitive files.
+- Consider using Ansible Vault for storing sensitive variables.
+
+## Troubleshooting
+
+If you encounter any issues:
+
+1. Check the Ansible output for error messages.
+2. Verify the logs in `/var/log/stage_5b/` on the target host.
+3. Ensure all prerequisites are met and the target host is accessible.
